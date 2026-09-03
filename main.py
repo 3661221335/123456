@@ -534,7 +534,9 @@ def main():
             print(f'[-] 生成链接失败: {e}', file=sys.stderr, flush=True)
             sys.exit(1)
     elif args.target:
-        tickets.append(AUTH.extract_ticket(args.target))
+        # 命令行参数才允许从文件读 ticket（一行一个那种）。
+        # HTTP 接口走的是 extract_ticket，不读文件。
+        tickets.append(AUTH.extract_ticket_from_arg(args.target))
     else:
         ap.print_help()
         sys.exit(1)

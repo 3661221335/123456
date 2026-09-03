@@ -13,6 +13,13 @@ from fake_useragent import UserAgent
 
 AUTH_API = "https://auth.platorelay.com/api"
 
+# ticket 至少要这么长才能切出两组 AES 钥匙。
+#
+# 第二组从第 2 个字符起算、取到第 33 个（ticket[1:17] 和 ticket[17:33]），所以 33 是
+# 硬下限。低于这个长度 Python 的切片不会报错，只会给出短的甚至空的钥匙，等到 AES 那
+# 一步才炸 ValueError —— 而那时候验证码 token 已经拿到了，白烧一个。
+MIN_TICKET_LEN = 33
+
 
 UA_SOURCES = (
     UserAgent(browsers=['Mobile Safari'], platforms='mobile'),
@@ -117,10 +124,17 @@ def aes_ctr_encrypt(plaintext, key_bytes, iv_bytes):
 
 
 def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
-    #从ticket构建AES-CTR字段
+    #从ticket构建AES-CTR字段。ticket 太短返回 None
     # user_agent: 加密体内声明的 UA。应与本次请求 HTTP 头的 User-Agent 保持一致,
     #   否则"头里是随机某机型、体内固定写死另一机型"会形成自相矛盾的指纹。
     # screen: 屏幕尺寸,默认按 UA 平台自动挑一个匹配值。
+    #
+    # 返回 None 而不是让它炸：Python 切片越界不报错,ticket 只有 8 个字符时
+    # ticket[16:32] 直接给空串,一路带到 AES 才抛 ValueError。那时候验证码已经解完、
+    # token 已经拿到了,白烧一个。所以在这里就挡住,让调用方早点知道。
+    if len(ticket) < MIN_TICKET_LEN:
+        return None
+
     if now_ms is None:
         now_ms = int(time.time() * 1000)
     if user_agent is None:
@@ -163,7 +177,11 @@ def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
 #获取ticket
 
 def extract_ticket(arg):
-    #从auth URL原始ticket字符串或文件路径获取ticket
+    #从 auth URL 或原始 ticket 字符串取出 ticket。不读任何文件
+    #
+    # HTTP 接口一律用这个。外面传进来的东西不能拿去碰服务器上的文件 —— 以前这里看到
+    # 含斜杠的输入就当路径去 open(),传 /etc/passwd 进来会把文件内容读出来当 ticket,
+    # 然后 URL 编码后发到上游去。要从文件读的走 extract_ticket_from_arg。
     t = arg.strip()
     if t.startswith('http'):
         parsed = urllib.parse.urlparse(t)
@@ -171,12 +189,23 @@ def extract_ticket(arg):
         if 'd' in qs:
             return qs['d'][0]
         return t
+    return t
+
+
+def extract_ticket_from_arg(arg):
+    #命令行专用：跟 extract_ticket 一样,但看着像路径时会当文件读
+    #
+    # 只给命令行参数用（python main.py tickets.txt 那种）。HTTP 接口绝对不能调这个,
+    # 那等于让任何能访问接口的人指定服务器上的文件路径。
+    t = arg.strip()
+    if t.startswith('http'):
+        return extract_ticket(t)
     if t.endswith('.txt') or '/' in t or '\\' in t:
         try:
             with open(t) as f:
                 content = f.read().strip()
                 if content:
-                    return extract_ticket(content)
+                    return extract_ticket_from_arg(content)
         except (IOError, OSError):
             pass
     return t
@@ -235,7 +264,16 @@ def create_session():
 def do_step(ticket, token, service=3, session=None, now_ms=None):
     # PUT /api/session/step
     step_ua = rand_ua()
-    meta, stream = build_meta_stream(ticket, now_ms, user_agent=step_ua)
+
+    # ticket 太短就直接说不行,别往上游发。
+    # 以前这里会让 AES 抛 ValueError,一路传到 main.py 的 except 才被接住,
+    # 白跑一整轮而且浪费掉已经拿到的验证码 token。
+    built = build_meta_stream(ticket, now_ms, user_agent=step_ua)
+    if built is None:
+        return {"success": False,
+                "error": f"ticket 长度不足（{len(ticket)} 字符，至少要 {MIN_TICKET_LEN} 个）"}
+    meta, stream = built
+
     url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(ticket)}&service={service}"
 
     body = json.dumps({
