@@ -9,7 +9,17 @@ import urllib.parse
 import requests
 import urllib3
 from Crypto.Cipher import AES as AES
-from fake_useragent import UserAgent
+# fake_useragent 是可选依赖:没有它就用下面这条固定的 iPhone UA,功能不受影响。
+# fake_useragent is optional: without it we fall back to the fixed iPhone UA below.
+try:
+    from fake_useragent import UserAgent
+
+    UA_SOURCES = (
+        UserAgent(browsers=['Mobile Safari'], platforms='mobile'),
+        UserAgent(browsers=['Chrome Mobile'], platforms='mobile', min_version=100.0),
+    )
+except Exception:  # ImportError 及其内部初始化异常都按缺失处理
+    UA_SOURCES = ()
 
 AUTH_API = "https://auth.platorelay.com/api"
 
@@ -20,11 +30,6 @@ AUTH_API = "https://auth.platorelay.com/api"
 # 一步才炸 ValueError —— 而那时候验证码 token 已经拿到了，白烧一个。
 MIN_TICKET_LEN = 33
 
-
-UA_SOURCES = (
-    UserAgent(browsers=['Mobile Safari'], platforms='mobile'),
-    UserAgent(browsers=['Chrome Mobile'], platforms='mobile', min_version=100.0),
-)
 
 # fake_useragent 每次取用约 16ms(内部重新筛选数据集),高并发下是显著开销:
 # 启动时预生成一批,之后 O(1) 轮转取用 —— 对外表现(UA 多样性)不变。
@@ -52,7 +57,10 @@ def screens_for(platform, os_name):
 
 def build_ua_pool(size=32):
     #预生成 UA 池:从各来源均匀取用,并为每个 UA 绑定一个匹配其平台的屏幕分辨率
+    # fake_useragent 缺失时 UA_SOURCES 为空,直接用固定 UA 兜底。
     pool = []
+    if not UA_SOURCES:
+        return [FALLBACK_UA]
     per = max(1, size // len(UA_SOURCES))
     for src in UA_SOURCES:
         got = 0
@@ -291,7 +299,9 @@ def do_step(ticket, token, service=3, session=None, now_ms=None):
             r = step_pool.request('PUT', url, body=body, redirect=False, headers={
                 'User-Agent': step_ua,
                 'Content-Type': 'application/json',
-                'Accept': 'application/json, text/plain, */*'
+                'Accept': 'application/json, text/plain, */*',
+                'x-client-name': 'platoboost webclient',
+                'x-client-version': '5.3.7'
             })
             if r.status != 200:
                 last_err = f"http {r.status}"

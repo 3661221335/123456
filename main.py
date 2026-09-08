@@ -14,11 +14,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-import captcha_solver as CS
 import auth_client as AUTH
 import link_generator as LG
 
-CAPTCHA_MAX_RETRIES = 1
 FALLBACK_SERVICES = [3]
 MAX_ROUNDS = 3
 MAX_ROUNDS_HARD_CAP = 12     # 12 轮，防死循环
@@ -73,87 +71,10 @@ class Timer:
 
 
 #验证码
-# warm session 复用:每次新建 session 都要重新 TLS 握手(实测多 ~0.17s)。
-# 模块级复用一个 session,连接 keep-alive;出错时自动重建。
-captcha_sess = None
-captcha_sess_lock = __import__('threading').Lock()
-
-
-def get_captcha_session():
-    global captcha_sess
-    with captcha_sess_lock:
-        if captcha_sess is None:
-            captcha_sess = CS.session()
-        return captcha_sess
-
-
-def reset_captcha_session():
-    global captcha_sess
-    with captcha_sess_lock:
-        try:
-            if captcha_sess is not None:
-                captcha_sess.close()
-        except Exception:
-            pass
-        captcha_sess = None
-
-
-def get_captcha_token(session=None, verbose=True, timer=None):
-    #获取验证码token
-    if session is None:
-        session = get_captcha_session()
-
-    if timer:
-        timer.start('captcha')
-
-    for attempt in range(CAPTCHA_MAX_RETRIES):
-        try:
-            ch = session.get(CS.API + '/challenge', timeout=10).json()
-            img_url = 'https://captcha.platorelay.com' + ch['image']
-            img = session.get(
-                img_url,
-                headers={'Referer': 'https://captcha.platorelay.com/'},
-                timeout=10
-            ).content
-
-            t0 = time.time()
-            x, y = CS.solve(img, ch['type'])
-            dt = time.time() - t0
-
-            if x is None:
-                if verbose:
-                    print(f'  [captcha] 尝试 {attempt + 1}: 无解 ({(dt * 1000):.0f}ms), 重试...', flush=True)
-                continue
-
-            r = session.post(CS.API + '/answer', json={
-                'challenge_id': ch['challenge_id'],
-                'x': x,
-                'y': y
-            }, timeout=10).json()
-
-            if r.get('success'):
-                token = r['token']
-                sel = CS.V8_DEBUG.get('selected', '')
-                strat = sel[0] if isinstance(sel, tuple) and sel else ''
-                if timer:
-                    timer.stop()
-                if verbose:
-                    print(f'  [captcha] {ch["type"]} @({x:.0f},{y:.0f})'
-                          f' {"HIT"} [{strat}]'
-                          f' {(dt * 1000):.0f}ms', flush=True)
-                return token
-            else:
-                if verbose:
-                    print(f'  [captcha] 尝试 {attempt + 1}: 未命中 ({(dt * 1000):.0f}ms), 重试...', flush=True)
-        except Exception as e:
-            if verbose:
-                print(f'  [captcha] 错误: {e}', flush=True)
-            # 连接层异常时重置 warm session,下次重新握手
-            reset_captcha_session()
-
-    if timer:
-        timer.stop()
-    raise RuntimeError(f'captcha 失败(已重试 {CAPTCHA_MAX_RETRIES} 次)')
+# 上游已取消图形验证码环节:step 的 captcha 字段不校验(null/任意值均可),
+# 旧版 captcha 服务已换成 orbit 类型、旧识别器失效,这里不再有识别步骤。
+# The far end dropped the picture captcha (the step captcha field is not
+# checked), so there is no recognition step any more.
 
 
 #Metadata->Service解析
@@ -356,21 +277,9 @@ def solve_chain(ticket, verbose=True, max_rounds=MAX_ROUNDS, session=None):
                                               stat_session, verbose, None)
 
                 if token is None:
-                    try:
-                        token = get_captcha_token(session=session, verbose=verbose, timer=timer)
-                    except RuntimeError as e:
-                        if verbose:
-                            print(f'  [error] {e}', flush=True)
-                            print(f'  [retry] 新建 session 重试 captcha...', flush=True)
-                        session = AUTH.create_session()
-                        try:
-                            token = get_captcha_token(session=session, verbose=verbose, timer=timer)
-                        except RuntimeError as e2:
-                            if verbose:
-                                print(f'  [error] {e2}', flush=True)
-                            print(f'  [-] captcha 失败(重试后仍失败), 无法继续', flush=True)
-                            last_exit[0] = 'captcha-failed'
-                            return None, timer
+                    # 新版协议不需要验证码:captcha 字段服务端不校验(null/任意值均可)。
+                    # 旧版 captcha 服务已换 orbit 类型、识别器失效,直接置空跳过。
+                    token = ""
 
                 if stat_future is not None:
                     try:

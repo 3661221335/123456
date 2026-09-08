@@ -1,11 +1,9 @@
-numpy>=1.21
-scipy>=1.7
-Pillow>=9.0
 requests>=2.28
 urllib3>=1.26
 pycryptodome>=3.15
+
+# 可选：随机 User-Agent 池。缺失时自动退回固定 UA，不影响功能。
 fake-useragent>=1.5
-numba>=0.56
 
 # --- HTTP API ---
 fastapi>=0.100
