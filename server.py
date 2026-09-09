@@ -19,6 +19,7 @@ except Exception:
 
 from main import solve_chain
 from auth_client import extract_ticket, MIN_TICKET_LEN
+import auth_client as AUTH
 
 app = FastAPI(title="Delta Cardkey", default_response_class=JSONResponse)
 executor = ThreadPoolExecutor(max_workers=10)
@@ -203,6 +204,10 @@ if __name__ == "__main__":
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--workers", "-w", type=int, default=10)
     args = ap.parse_args()
+    # 后台盯上游客户端版本：启动刷一次，之后每小时一次。
+    # Watch the far end's client version in the background: once at startup,
+    # then hourly.
+    AUTH.start_version_watcher()
     try:
         import resource
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)

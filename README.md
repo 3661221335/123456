@@ -8,6 +8,12 @@
 
 ## 最近更改
 
+### 客户端版本号自动跟进上游
+
+提交时携带的 `x-client-version` 必须与上游网页客户端一致，旧了会被直接拒绝（`outdated client`）。原先硬编码 `5.3.7`，上游一升级就要手动改代码重新部署。现改为启动时与每小时自动抓取上游单页应用脚本，提取版本号并逐个验证，试出可用值即自动更新；提取失败退回内置兜底值（`FALLBACK_VERSION`），服务不停。
+
+同时 `do_step` 签名变更：`do_step(ticket, token, service)` → `do_step(ticket, service)`，`captcha` 字段按真实浏览器抓包形态发 `null`。
+
 ### 移除图形验证码
 
 上游已取消图形验证码（step 的 `captcha` 字段不再校验，旧验证码服务已换 orbit 类型、识别器失效）。本版移除 `captcha_solver.py` 及 `numpy`/`scipy`/`Pillow`/`numba` 依赖，验证码环节直接跳过。`fake-useragent` 改为可选，缺失时退回固定 UA，不影响功能。
@@ -96,7 +102,7 @@ ticket = extract_ticket("https://auth.platorelay.com/a?d=...")
 s = create_session()
 
 # 推进 checkpoint（新版协议无需验证码 token）
-result = do_step(ticket, "", service=3)
+result = do_step(ticket, service=3)
 print(result)
 ```
 

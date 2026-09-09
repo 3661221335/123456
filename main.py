@@ -128,7 +128,7 @@ def throttled(r):
     return ('too fast' in msg) or ('slow down' in msg) or ('too many' in msg)
 
 
-def do_step_with_retry(ticket, token, service=None, session=None, verbose=True, timer=None,
+def do_step_with_retry(ticket, service=None, session=None, verbose=True, timer=None,
                        gap_state=None, overlap_poll=False, poll_session=None):
     #执行step失败时尝试回退 遇到限流则退避后直接重试
     services_to_try = []
@@ -177,7 +177,7 @@ def do_step_with_retry(ticket, token, service=None, session=None, verbose=True, 
                 if overlap_poll and overlap_thread is None:
                     overlap_thread = threading.Thread(target=overlap_poll_worker, daemon=True)
                     overlap_thread.start()
-                r = AUTH.do_step(ticket, token, service=svc, session=session)
+                r = AUTH.do_step(ticket, service=svc, session=session)
                 dt = time.time() - t0
                 if gap_state is not None:
                     gap_state['ts'] = time.time()
@@ -256,7 +256,6 @@ def solve_chain(ticket, verbose=True, max_rounds=MAX_ROUNDS, session=None):
     round_idx = 0
     last_exit = ['round-exhausted']
     gap_state = {'ts': 0.0}
-    token = None
 
     while round_idx < round_cap:
         if verbose:
@@ -275,11 +274,6 @@ def solve_chain(ticket, verbose=True, max_rounds=MAX_ROUNDS, session=None):
                     stat_session = AUTH.create_session()
                     stat_future = pool.submit(check_key_in_response, current_ticket,
                                               stat_session, verbose, None)
-
-                if token is None:
-                    # 新版协议不需要验证码:captcha 字段服务端不校验(null/任意值均可)。
-                    # 旧版 captcha 服务已换 orbit 类型、识别器失效,直接置空跳过。
-                    token = ""
 
                 if stat_future is not None:
                     try:
@@ -326,7 +320,7 @@ def solve_chain(ticket, verbose=True, max_rounds=MAX_ROUNDS, session=None):
         # 对最后一步开启step/poll 重叠 两个串行RTT压成一个
         last_step = round_idx > 0
         service, resp, overlap = do_step_with_retry(
-            current_ticket, token,
+            current_ticket,
             service=current_service,
             session=session,
             verbose=verbose,
@@ -427,6 +421,11 @@ def main():
     args = ap.parse_args()
 
     verbose = not args.quiet
+
+    # 后台盯上游客户端版本：启动刷一次，之后每小时一次。
+    # Watch the far end's client version in the background: once at startup,
+    # then hourly.
+    AUTH.start_version_watcher()
 
     tickets = []
     gen_start = time.time()

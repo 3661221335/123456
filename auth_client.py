@@ -4,6 +4,9 @@
 import json
 import base64
 import itertools
+import random
+import string
+import threading
 import time
 import urllib.parse
 import requests
@@ -22,6 +25,165 @@ except Exception:  # ImportError 及其内部初始化异常都按缺失处理
     UA_SOURCES = ()
 
 AUTH_API = "https://auth.platorelay.com/api"
+
+# ---------------------------------------------------------------------------
+# 客户端版本号：自动跟上上游
+#
+# 提交时带的 x-client-version 得跟上游网页客户端一致，旧了会被直接拒绝
+# （"outdated client"）。写死在代码里，上游一升级就得手动跟着改 —— 漏改一次
+# 服务就全线停摆。所以自动拿：
+#
+# 1. 抓入口页 HTML（约 500B），抠出 /assets/index-<hash>.js 的地址
+# 2. Range 请求只取脚本前 256KB（版本号实测在前 128KB 里，2MB 全量省掉 87%）
+# 3. 从引号包裹的字符串里抠出所有形如 x.y.z 的候选
+# 4. 逐个用假 ticket 探测：版本太旧回 "outdated client"，版本可用回别的错
+#    （假 ticket 本身无效的那种）。探测零成本：不碰真实会话、不占求解名额
+#
+# 脚本内容用完即弃：候选一提取出来就释放，不落盘，内存里只留几字节的版本号。
+# 全部候选失败时退回 FALLBACK_VERSION。缓存 1 小时，刷新只发生在后台线程。
+# ---------------------------------------------------------------------------
+APP_URL = "https://auth.platorelay.com/a"
+FALLBACK_VERSION = "5.4.0"
+VER_TTL = 3600.0  # 版本缓存秒数
+
+_client_version = FALLBACK_VERSION
+_client_version_at = time.time()  # 启动即视为新鲜:首请求用兜底值,刷新交给后台线程
+_ver_lock = threading.Lock()
+
+
+def _http_get(url, headers=None):
+    # 紧超时：版本提取挂了不能拖慢提交路径
+    try:
+        r = requests.get(url, headers=headers or {}, timeout=8)
+        if r.status_code != 200:
+            return None
+        return r.text
+    except Exception:
+        return None
+
+
+def _version_candidates(text):
+    # 从引号包裹的字符串里抠 x.y.z 形状的候选（三段纯数字）
+    found = []
+    i = 0
+    data = text
+    n = len(data)
+    while i < n:
+        if data[i] == "'":
+            j = data.find("'", i + 1)
+            if j < 0:
+                break
+            token = data[i + 1:j]
+            parts = token.split('.')
+            if (len(parts) == 3
+                    and all(p.isdigit() for p in parts)
+                    and token not in found):
+                found.append(token)
+            i = j + 1
+            continue
+        i += 1
+    return found
+
+
+def _version_works(version, ua):
+    # 假 ticket 探测：格式合法但不指向任何真会话。
+    # 服务器先查版本后查票 —— outdated = 版本不行，invalid payload = 版本过了。
+    letters = string.ascii_letters + string.digits
+    fake = ''.join(random.choice(letters) for _ in range(64))
+    built = build_meta_stream(fake, user_agent=ua)
+    if built is None:
+        return False
+    meta, stream = built
+    url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(fake)}&service=3"
+    body = json.dumps({"captcha": None, "meta": meta, "stream": stream, "resolved": True}).encode()
+    try:
+        r = step_pool.request('PUT', url, body=body, redirect=False, headers={
+            'User-Agent': ua,
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+            'x-client-name': 'platoboost webclient',
+            'x-client-version': version,
+        })
+        return b'outdated client' not in r.data
+    except Exception:
+        return False
+
+
+def _refresh_client_version():
+    global _client_version, _client_version_at
+    try:
+        html = _http_get(APP_URL, {'User-Agent': FALLBACK_UA})
+        if not html:
+            return
+        i = html.find('/assets/index-')
+        if i < 0:
+            return
+        j = html.find('"', i)
+        if j < 0:
+            return
+        script_url = 'https://auth.platorelay.com' + html[i:j]
+
+        # 先 Range 取前 256KB，找不到候选再全量兜底
+        candidates = []
+        try:
+            r = requests.get(script_url, headers={
+                'User-Agent': FALLBACK_UA, 'Range': 'bytes=0-262143'
+            }, timeout=8)
+            if r.status_code == 200 or r.status_code == 206:
+                candidates = _version_candidates(r.text)
+        except Exception:
+            pass
+        if not candidates:
+            body = _http_get(script_url, {'User-Agent': FALLBACK_UA})
+            if body:
+                candidates = _version_candidates(body)
+        if not candidates:
+            return
+
+        ua = FALLBACK_UA
+        for cand in candidates:
+            if _version_works(cand, ua):
+                global_set(cand)
+                return
+    except Exception:
+        pass
+
+
+def global_set(version):
+    global _client_version, _client_version_at
+    if version != _client_version:
+        print(f'[版本] 客户端版本更新: {_client_version} -> {version}', flush=True)
+    _client_version = version
+    _client_version_at = time.time()
+
+
+def client_version():
+    # 纯读缓存。刷新只发生在后台线程，提交路径绝不被版本提取拖慢。
+    global _client_version_at
+    if time.time() - _client_version_at > VER_TTL:
+        # 过期了就在本线程刷一次（带锁防并发重复刷）
+        if _ver_lock.acquire(blocking=False):
+            try:
+                if time.time() - _client_version_at > VER_TTL:
+                    _refresh_client_version()
+                    _client_version_at = time.time()
+            finally:
+                _ver_lock.release()
+    return _client_version
+
+
+def start_version_watcher():
+    # 后台线程：启动刷一次，之后每小时一次
+    def worker():
+        while True:
+            try:
+                _refresh_client_version()
+                _client_version_at = time.time()
+            except Exception:
+                _client_version_at = time.time()
+            time.sleep(VER_TTL)
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
 
 # ticket 至少要这么长才能切出两组 AES 钥匙。
 #
@@ -269,13 +431,16 @@ def create_session():
     return s
 
 
-def do_step(ticket, token, service=3, session=None, now_ms=None):
+def do_step(ticket, service=3, session=None, now_ms=None):
     # PUT /api/session/step
+    #
+    # 新版协议不校验 captcha 字段(可为 null),旧版图形验证码已随上游换 orbit 类型
+    # 而作废,这里按真实浏览器抓包的形态发 null。
     step_ua = rand_ua()
 
     # ticket 太短就直接说不行,别往上游发。
     # 以前这里会让 AES 抛 ValueError,一路传到 main.py 的 except 才被接住,
-    # 白跑一整轮而且浪费掉已经拿到的验证码 token。
+    # 白跑一整轮。
     built = build_meta_stream(ticket, now_ms, user_agent=step_ua)
     if built is None:
         return {"success": False,
@@ -285,7 +450,7 @@ def do_step(ticket, token, service=3, session=None, now_ms=None):
     url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(ticket)}&service={service}"
 
     body = json.dumps({
-        "captcha": token,
+        "captcha": None,
         "meta": meta,
         "stream": stream,
         "resolved": True
@@ -301,7 +466,7 @@ def do_step(ticket, token, service=3, session=None, now_ms=None):
                 'Content-Type': 'application/json',
                 'Accept': 'application/json, text/plain, */*',
                 'x-client-name': 'platoboost webclient',
-                'x-client-version': '5.3.7'
+                'x-client-version': client_version()
             })
             if r.status != 200:
                 last_err = f"http {r.status}"
