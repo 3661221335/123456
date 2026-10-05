@@ -498,3 +498,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
+# 给 SnapDeploy / FastAPI 用的入口（必须放在文件最末尾，防止循环导入）
+from server import app
