@@ -11,7 +11,6 @@ import time
 import urllib.parse
 import requests
 import urllib3
-import os
 from Crypto.Cipher import AES as AES
 try:
     from fake_useragent import UserAgent
@@ -327,45 +326,10 @@ def extract_ticket_from_callback(callback_url):
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
     return qs.get('d', [None])[0]
 
-# ---- 多代理支持开始 ----
-# 解析代理列表
-_proxy_urls = []
-proxy_list_env = os.environ.get('PROXY_LIST', '')
-if proxy_list_env:
-    for p in proxy_list_env.split(','):
-        p = p.strip()
-        if p:
-            _proxy_urls.append(p)
-else:
-    host = os.environ.get('PROXY_HOST')
-    port = os.environ.get('PROXY_PORT')
-    user = os.environ.get('PROXY_USERNAME')
-    pwd = os.environ.get('PROXY_PASSWORD')
-    if host and port:
-        if user and pwd:
-            _proxy_urls.append(f'http://{user}:{pwd}@{host}:{port}')
-        else:
-            _proxy_urls.append(f'http://{host}:{port}')
-
-if not _proxy_urls:
-    _proxy_urls = [None]
-
-_proxy_managers = []
-for proxy_url in _proxy_urls:
-    if proxy_url:
-        _proxy_managers.append(urllib3.ProxyManager(proxy_url, num_pools=8, maxsize=64, block=False, retries=False, timeout=urllib3.Timeout(connect=3.0, read=8.0)))
-    else:
-        _proxy_managers.append(urllib3.PoolManager(num_pools=8, maxsize=64, block=False, retries=False, timeout=urllib3.Timeout(connect=3.0, read=8.0)))
-
-class RandomProxyPool:
-    def __init__(self, managers):
-        self.managers = managers
-    def request(self, method, url, **kwargs):
-        mgr = random.choice(self.managers)
-        return mgr.request(method, url, **kwargs)
-
-step_pool = RandomProxyPool(_proxy_managers)
-# ---- 多代理支持结束 ----
+step_pool = urllib3.PoolManager(
+    num_pools=8, maxsize=64, block=False, retries=False,
+    timeout=urllib3.Timeout(connect=3.0, read=8.0),
+)
 
 def create_session():
     s = requests.Session()
