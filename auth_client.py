@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import json
 import base64
 import itertools
@@ -13,15 +10,14 @@ import urllib.parse
 import requests
 import urllib3
 from Crypto.Cipher import AES as AES
+from fastapi import FastAPI, Query
 
 try:
     from curl_cffi import requests as cffi_requests
     _HAS_CFFI = True
-    print("[指纹] curl_cffi 已加载，将使用 Chrome TLS 指纹伪装", flush=True)
 except ImportError:
     _HAS_CFFI = False
     cffi_requests = None
-    print("[指纹] 警告：curl_cffi 未安装，回退到普通请求", flush=True)
 
 try:
     from fake_useragent import UserAgent
@@ -41,7 +37,6 @@ _client_version = FALLBACK_VERSION
 _client_version_at = time.time()
 _ver_lock = threading.Lock()
 
-
 def _env_proxy_url():
     proxy_list = (os.environ.get('PROXY_LIST') or '').strip()
     if proxy_list:
@@ -58,13 +53,11 @@ def _env_proxy_url():
         return f"http://{user}:{pwd}@{host}:{port}"
     return f"http://{host}:{port}"
 
-
 class _CffiResp:
     def __init__(self, r):
         self.status = r.status_code
         self.data = r.content
         self.headers = dict(r.headers)
-
 
 class _CffiPool:
     def __init__(self, impersonate="chrome"):
@@ -96,7 +89,6 @@ class _CffiPool:
         )
         return _CffiResp(r)
 
-
 def _http_get(url, headers=None):
     try:
         if _HAS_CFFI:
@@ -110,7 +102,6 @@ def _http_get(url, headers=None):
         return r.text
     except Exception:
         return None
-
 
 def _version_candidates(text):
     found = []
@@ -133,7 +124,6 @@ def _version_candidates(text):
         i += 1
     return found
 
-
 def _version_works(version, ua):
     letters = string.ascii_letters + string.digits
     fake = ''.join(random.choice(letters) for _ in range(64))
@@ -154,7 +144,6 @@ def _version_works(version, ua):
         return b'outdated client' not in r.data
     except Exception:
         return False
-
 
 def _refresh_client_version():
     global _client_version, _client_version_at
@@ -199,14 +188,12 @@ def _refresh_client_version():
     except Exception:
         pass
 
-
 def global_set(version):
     global _client_version, _client_version_at
     if version != _client_version:
         print(f'[版本] 客户端版本更新: {_client_version} -> {version}', flush=True)
     _client_version = version
     _client_version_at = time.time()
-
 
 def client_version():
     global _client_version_at
@@ -220,7 +207,6 @@ def client_version():
                 _ver_lock.release()
     return _client_version
 
-
 def start_version_watcher():
     def worker():
         while True:
@@ -232,7 +218,6 @@ def start_version_watcher():
             time.sleep(VER_TTL)
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-
 
 MIN_TICKET_LEN = 33
 
@@ -247,7 +232,6 @@ SCREENS_ANDROID = ('360x800', '412x915', '393x873', '384x854', '360x780', '412x8
 FALLBACK_UA = ('Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) '
                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 Mobile/15E148 Safari/604.1')
 
-
 def screens_for(platform, os_name):
     p = (platform or '').lower()
     o = (os_name or '').lower()
@@ -256,7 +240,6 @@ def screens_for(platform, os_name):
     if 'iphone' in p or 'ipod' in p or 'ios' in o:
         return SCREENS_IPHONE
     return SCREENS_ANDROID
-
 
 def build_ua_pool(size=32):
     pool = []
@@ -286,13 +269,11 @@ def build_ua_pool(size=32):
         UA_SCREEN.setdefault(FALLBACK_UA, SCREENS_IPHONE[0])
     return pool
 
-
 def rand_ua():
     global UA_POOL
     if not UA_POOL:
         UA_POOL = build_ua_pool()
     return UA_POOL[next(UA_IDX) % len(UA_POOL)]
-
 
 def pick_screen(user_agent):
     s = UA_SCREEN.get(user_agent)
@@ -306,7 +287,6 @@ def pick_screen(user_agent):
     else:
         cands = SCREENS_ANDROID
     return cands[hash(user_agent or '') % len(cands)]
-
 
 def aes_ctr_encrypt(plaintext, key_bytes, iv_bytes):
     key = bytearray(key_bytes) if isinstance(key_bytes, (bytes, bytearray)) else bytearray(key_bytes)
@@ -325,7 +305,6 @@ def aes_ctr_encrypt(plaintext, key_bytes, iv_bytes):
             if j < 0:
                 break
     return bytes(out)
-
 
 def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
     if len(ticket) < MIN_TICKET_LEN:
@@ -369,7 +348,6 @@ def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
 
     return meta, stream
 
-
 def extract_ticket(arg):
     t = arg.strip()
     if t.startswith('http'):
@@ -379,7 +357,6 @@ def extract_ticket(arg):
             return qs['d'][0]
         return t
     return t
-
 
 def extract_ticket_from_arg(arg):
     t = arg.strip()
@@ -394,7 +371,6 @@ def extract_ticket_from_arg(arg):
         except (IOError, OSError):
             pass
     return t
-
 
 def decode_callback_url(loot_url):
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(loot_url).query)
@@ -411,13 +387,11 @@ def decode_callback_url(loot_url):
         pass
     return None
 
-
 def extract_ticket_from_callback(callback_url):
     if not callback_url:
         return None
     qs = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
     return qs.get('d', [None])[0]
-
 
 if _HAS_CFFI:
     step_pool = _CffiPool(impersonate="chrome")
@@ -426,14 +400,13 @@ else:
     if _proxy_url:
         step_pool = urllib3.ProxyManager(
             _proxy_url, num_pools=8, maxsize=64, block=False, retries=False,
-            timeout=urllib3.Timeout(connect=3.0, read=8.0),
+            timeout=urllib3.Timeout(connect=3.0, read=20.0),
         )
     else:
         step_pool = urllib3.PoolManager(
             num_pools=8, maxsize=64, block=False, retries=False,
-            timeout=urllib3.Timeout(connect=3.0, read=8.0),
+            timeout=urllib3.Timeout(connect=3.0, read=20.0),
         )
-
 
 def create_session():
     s = requests.Session()
@@ -447,7 +420,6 @@ def create_session():
     s.mount('http://', adapter)
     s.mount('https://', adapter)
     return s
-
 
 def do_step(ticket, service=3, session=None, now_ms=None):
     step_ua = rand_ua()
@@ -500,7 +472,6 @@ def do_step(ticket, service=3, session=None, now_ms=None):
             return {"success": False, "error": last_err}
     return {"success": False, "error": last_err or "step failed"}
 
-
 def get_json(path_qs, retries=3, sleep=0.25):
     last_err = None
     for attempt in range(retries + 1):
@@ -530,18 +501,14 @@ def get_json(path_qs, retries=3, sleep=0.25):
             return {"success": False, "error": last_err, "transient": True}
     return {"success": False, "error": last_err or "get failed", "transient": True}
 
-
 def get_session_status(ticket, session=None):
     return get_json(f"session/status?ticket={urllib.parse.quote(ticket)}")
-
 
 def get_session_metadata(ticket, session=None):
     return get_json(f"session/metadata?ticket={urllib.parse.quote(ticket)}")
 
-
 INVALID_MARKERS = ('invalid payload', 'expired', 'not found', 'invalid session',
                      'invalid ticket', 'does not exist')
-
 
 def check_ticket_valid(ticket, session=None):
     try:
@@ -560,3 +527,42 @@ def check_ticket_valid(ticket, session=None):
             return False, str(meta.get('message') or meta.get('error') or 'invalid link')
         return True, None
     return True, None
+
+app = FastAPI()
+
+@app.on_event("startup")
+def startup_event():
+    start_version_watcher()
+
+@app.get("/health")
+@app.get("/healthz")
+@app.get("/")
+def health_check():
+    return {"status": "ok"}
+
+@app.get("/delta")
+def delta(url: str = Query(...)):
+    ticket = extract_ticket_from_arg(url)
+    if not ticket or len(ticket) < MIN_TICKET_LEN:
+        return {"key": None, "error": "invalid url (no ticket)"}
+
+    valid, err = check_ticket_valid(ticket)
+    if not valid:
+        return {"key": None, "error": err or "expired link"}
+
+    for _ in range(5):
+        result = do_step(ticket)
+        if isinstance(result, dict):
+            if result.get("success") is True and result.get("key"):
+                return {"key": result["key"], "error": None}
+            if result.get("key"):
+                return {"key": result["key"], "error": None}
+            if "invalid" in str(result.get("error", "")).lower() or "expired" in str(result.get("error", "")).lower():
+                return {"key": None, "error": result.get("error")}
+        time.sleep(0.5)
+
+    return {"key": None, "error": "solve failed"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
