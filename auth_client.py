@@ -13,6 +13,7 @@ import urllib.parse
 import requests
 import urllib3
 from Crypto.Cipher import AES as AES
+from fastapi import FastAPI, Query
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -485,7 +486,8 @@ def do_step(ticket, service=3, session=None, now_ms=None):
                     continue
                 return {"success": False, "error": last_err}
             try:
-                return json.loads(r.data)
+                # 这里修改了 .data 为 .content
+                return json.loads(r.content)
             except Exception:
                 last_err = "non-json response"
                 if attempt < STEP_HTTP_RETRIES:
@@ -515,7 +517,8 @@ def get_json(path_qs, retries=3, sleep=0.25):
                     continue
                 return {"success": False, "error": last_err, "transient": True}
             try:
-                return json.loads(r.data)
+                # 这里修改了 .data 为 .content
+                return json.loads(r.content)
             except Exception:
                 last_err = "non-json response"
                 if attempt < retries:
@@ -560,3 +563,41 @@ def check_ticket_valid(ticket, session=None):
             return False, str(meta.get('message') or meta.get('error') or 'invalid link')
         return True, None
     return True, None
+
+
+app = FastAPI()
+
+@app.on_event("startup")
+def startup_event():
+    start_version_watcher()
+
+@app.get("/health")
+@app.get("/healthz")
+@app.get("/")
+def health_check():
+    return {"status": "ok"}
+
+@app.get("/delta")
+def delta(url: str = Query(...)):
+    ticket = extract_ticket_from_arg(url)
+    if not ticket or len(ticket) < MIN_TICKET_LEN:
+        return {"key": None, "error": "invalid url (no ticket)"}
+
+    valid, err = check_ticket_valid(ticket)
+    if not valid:
+        return {"key": None, "error": err or "expired link"}
+
+    result = do_step(ticket)
+    if isinstance(result, dict):
+        if result.get("success") is True and result.get("key"):
+            return {"key": result["key"], "error": None}
+        if result.get("key"):
+            return {"key": result["key"], "error": None}
+        err_msg = str(result.get("error", ""))
+        return {"key": None, "error": err_msg}
+
+    return {"key": None, "error": "solve failed"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
