@@ -14,6 +14,7 @@ import requests
 import urllib3
 from Crypto.Cipher import AES as AES
 from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
 
 try:
     from curl_cffi import requests as cffi_requests
@@ -473,6 +474,13 @@ def check_ticket_valid(ticket, session=None):
 
 app = FastAPI()
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=200,
+        content={"key": None, "error": f"solve exception: {type(exc).__name__}"}
+    )
+
 @app.on_event("startup")
 def startup_event():
     start_version_watcher()
@@ -485,24 +493,27 @@ def health_check():
 
 @app.get("/delta")
 def delta(url: str = Query(...)):
-    ticket = extract_ticket_from_arg(url)
-    if not ticket or len(ticket) < MIN_TICKET_LEN:
-        return {"key": None, "error": "invalid url (no ticket)"}
+    try:
+        ticket = extract_ticket_from_arg(url)
+        if not ticket or len(ticket) < MIN_TICKET_LEN:
+            return {"key": None, "error": "invalid url (no ticket)"}
 
-    valid, err = check_ticket_valid(ticket)
-    if not valid:
-        return {"key": None, "error": err or "expired link"}
+        valid, err = check_ticket_valid(ticket)
+        if not valid:
+            return {"key": None, "error": err or "expired link"}
 
-    result = do_step(ticket)
-    if isinstance(result, dict):
-        if result.get("success") is True and result.get("key"):
-            return {"key": result["key"], "error": None}
-        if result.get("key"):
-            return {"key": result["key"], "error": None}
-        err_msg = str(result.get("error", ""))
-        return {"key": None, "error": err_msg}
+        result = do_step(ticket)
+        if isinstance(result, dict):
+            if result.get("success") is True and result.get("key"):
+                return {"key": result["key"], "error": None}
+            if result.get("key"):
+                return {"key": result["key"], "error": None}
+            err_msg = str(result.get("error", ""))
+            return {"key": None, "error": err_msg}
 
-    return {"key": None, "error": "solve failed"}
+        return {"key": None, "error": "solve failed"}
+    except Exception as e:
+        return {"key": None, "error": f"solve exception: {type(e).__name__}"}
 
 if __name__ == "__main__":
     import uvicorn
