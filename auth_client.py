@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import json
 import base64
 import itertools
@@ -36,6 +39,15 @@ VER_TTL = 3600.0
 _client_version = FALLBACK_VERSION
 _client_version_at = time.time()
 _ver_lock = threading.Lock()
+
+def _get_response_body(r):
+    if hasattr(r, 'data') and r.data is not None:
+        return r.data
+    if hasattr(r, 'content') and r.content is not None:
+        return r.content
+    if hasattr(r, 'read') and callable(r.read):
+        return r.read()
+    return b''
 
 def _env_proxy_url():
     proxy_list = (os.environ.get('PROXY_LIST') or '').strip()
@@ -141,7 +153,7 @@ def _version_works(version, ua):
             'x-client-name': 'platoboost webclient',
             'x-client-version': version,
         })
-        return b'outdated client' not in r.data
+        return b'outdated client' not in _get_response_body(r)
     except Exception:
         return False
 
@@ -305,7 +317,7 @@ def aes_ctr_encrypt(plaintext, key_bytes, iv_bytes):
     return bytes(out)
 
 def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
-    if len(ticket) < MIN_TICKET_LEN:
+    if not ticket or len(ticket) < MIN_TICKET_LEN:
         return None
 
     if now_ms is None:
@@ -347,6 +359,8 @@ def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
     return meta, stream
 
 def extract_ticket(arg):
+    if not arg:
+        return ""
     t = arg.strip()
     if t.startswith('http'):
         parsed = urllib.parse.urlparse(t)
@@ -357,6 +371,8 @@ def extract_ticket(arg):
     return t
 
 def extract_ticket_from_arg(arg):
+    if not arg:
+        return ""
     t = arg.strip()
     if t.startswith('http'):
         return extract_ticket(t)
@@ -404,16 +420,16 @@ def do_step(ticket, service=3, session=None, now_ms=None):
                 'x-client-name': 'platoboost webclient',
                 'x-client-version': client_version()
             })
-            if r.status != 200:
-                last_err = f"http {r.status}"
+            if getattr(r, 'status', getattr(r, 'status_code', 0)) != 200:
+                last_err = f"http {getattr(r, 'status', getattr(r, 'status_code', 0))}"
                 continue
             try:
-                return json.loads(r.data)
+                return json.loads(_get_response_body(r))
             except Exception:
                 last_err = "non-json response"
                 continue
         except Exception as e:
-            last_err = str(e)
+            last_err = f"{type(e).__name__}: {e}"
             continue
     return {"success": False, "error": last_err or "step failed"}
 
@@ -425,12 +441,12 @@ def get_json(path_qs, retries=1):
                 redirect=False,
                 timeout=5,
                 headers={'User-Agent': rand_ua(), 'Accept': 'application/json'})
-            if r.status != 200:
-                last_err = f"http {r.status}"
+            if getattr(r, 'status', getattr(r, 'status_code', 0)) != 200:
+                last_err = f"http {getattr(r, 'status', getattr(r, 'status_code', 0))}"
                 continue
-            return json.loads(r.data)
+            return json.loads(_get_response_body(r))
         except Exception as e:
-            last_err = str(e)
+            last_err = f"{type(e).__name__}: {e}"
             continue
     return {"success": False, "error": last_err or "get failed", "transient": True}
 
