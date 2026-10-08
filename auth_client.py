@@ -9,20 +9,19 @@ import string
 import threading
 import time
 import os
-import traceback
 import urllib.parse
 import requests
 import urllib3
 from Crypto.Cipher import AES as AES
-from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
 
 try:
     from curl_cffi import requests as cffi_requests
     _HAS_CFFI = True
+    print("[指纹] curl_cffi 已加载，将使用 Chrome TLS 指纹伪装", flush=True)
 except ImportError:
     _HAS_CFFI = False
     cffi_requests = None
+    print("[指纹] 警告：curl_cffi 未安装，回退到普通请求", flush=True)
 
 try:
     from fake_useragent import UserAgent
@@ -42,16 +41,6 @@ _client_version = FALLBACK_VERSION
 _client_version_at = time.time()
 _ver_lock = threading.Lock()
 
-def _get_response_body(r):
-    if not r:
-        return b''
-    if hasattr(r, 'data') and r.data is not None:
-        return r.data
-    if hasattr(r, 'content') and r.content is not None:
-        return r.content
-    if hasattr(r, 'read') and callable(r.read):
-        return r.read()
-    return b''
 
 def _env_proxy_url():
     proxy_list = (os.environ.get('PROXY_LIST') or '').strip()
@@ -69,11 +58,13 @@ def _env_proxy_url():
         return f"http://{user}:{pwd}@{host}:{port}"
     return f"http://{host}:{port}"
 
+
 class _CffiResp:
     def __init__(self, r):
         self.status = r.status_code
         self.data = r.content
         self.headers = dict(r.headers)
+
 
 class _CffiPool:
     def __init__(self, impersonate="chrome"):
@@ -81,13 +72,13 @@ class _CffiPool:
 
     def _resolve_timeout(self, timeout):
         if timeout is None:
-            return 10
+            return 30
         if hasattr(timeout, 'read') and hasattr(timeout, 'connect'):
-            return timeout.read or timeout.connect or 10
+            return timeout.read or timeout.connect or 30
         try:
             return float(timeout)
         except Exception:
-            return 10
+            return 30
 
     def request(self, method, url, body=None, headers=None, timeout=None, redirect=False, **kwargs):
         t = self._resolve_timeout(timeout)
@@ -105,19 +96,21 @@ class _CffiPool:
         )
         return _CffiResp(r)
 
+
 def _http_get(url, headers=None):
     try:
         if _HAS_CFFI:
-            r = cffi_requests.get(url, headers=headers or {}, impersonate="chrome", timeout=5)
+            r = cffi_requests.get(url, headers=headers or {}, impersonate="chrome", timeout=8)
             if r.status_code != 200:
                 return None
             return r.text
-        r = requests.get(url, headers=headers or {}, timeout=5)
+        r = requests.get(url, headers=headers or {}, timeout=8)
         if r.status_code != 200:
             return None
         return r.text
     except Exception:
         return None
+
 
 def _version_candidates(text):
     found = []
@@ -140,6 +133,7 @@ def _version_candidates(text):
         i += 1
     return found
 
+
 def _version_works(version, ua):
     letters = string.ascii_letters + string.digits
     fake = ''.join(random.choice(letters) for _ in range(64))
@@ -150,16 +144,17 @@ def _version_works(version, ua):
     url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(fake)}&service=3"
     body = json.dumps({"captcha": None, "meta": meta, "stream": stream, "resolved": True}).encode()
     try:
-        r = step_pool.request('PUT', url, body=body, redirect=False, timeout=5, headers={
+        r = step_pool.request('PUT', url, body=body, redirect=False, headers={
             'User-Agent': ua,
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             'x-client-name': 'platoboost webclient',
             'x-client-version': version,
         })
-        return b'outdated client' not in _get_response_body(r)
+        return b'outdated client' not in r.data
     except Exception:
         return False
+
 
 def _refresh_client_version():
     global _client_version, _client_version_at
@@ -180,11 +175,11 @@ def _refresh_client_version():
             if _HAS_CFFI:
                 r = cffi_requests.get(script_url, headers={
                     'User-Agent': FALLBACK_UA, 'Range': 'bytes=0-262143'
-                }, impersonate="chrome", timeout=5)
+                }, impersonate="chrome", timeout=8)
             else:
                 r = requests.get(script_url, headers={
                     'User-Agent': FALLBACK_UA, 'Range': 'bytes=0-262143'
-                }, timeout=5)
+                }, timeout=8)
             if r.status_code in (200, 206):
                 candidates = _version_candidates(r.text)
         except Exception:
@@ -204,10 +199,14 @@ def _refresh_client_version():
     except Exception:
         pass
 
+
 def global_set(version):
     global _client_version, _client_version_at
+    if version != _client_version:
+        print(f'[版本] 客户端版本更新: {_client_version} -> {version}', flush=True)
     _client_version = version
     _client_version_at = time.time()
+
 
 def client_version():
     global _client_version_at
@@ -221,6 +220,7 @@ def client_version():
                 _ver_lock.release()
     return _client_version
 
+
 def start_version_watcher():
     def worker():
         while True:
@@ -232,6 +232,7 @@ def start_version_watcher():
             time.sleep(VER_TTL)
     t = threading.Thread(target=worker, daemon=True)
     t.start()
+
 
 MIN_TICKET_LEN = 33
 
@@ -246,6 +247,7 @@ SCREENS_ANDROID = ('360x800', '412x915', '393x873', '384x854', '360x780', '412x8
 FALLBACK_UA = ('Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) '
                'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 Mobile/15E148 Safari/604.1')
 
+
 def screens_for(platform, os_name):
     p = (platform or '').lower()
     o = (os_name or '').lower()
@@ -254,6 +256,7 @@ def screens_for(platform, os_name):
     if 'iphone' in p or 'ipod' in p or 'ios' in o:
         return SCREENS_IPHONE
     return SCREENS_ANDROID
+
 
 def build_ua_pool(size=32):
     pool = []
@@ -283,11 +286,13 @@ def build_ua_pool(size=32):
         UA_SCREEN.setdefault(FALLBACK_UA, SCREENS_IPHONE[0])
     return pool
 
+
 def rand_ua():
     global UA_POOL
     if not UA_POOL:
         UA_POOL = build_ua_pool()
     return UA_POOL[next(UA_IDX) % len(UA_POOL)]
+
 
 def pick_screen(user_agent):
     s = UA_SCREEN.get(user_agent)
@@ -301,6 +306,7 @@ def pick_screen(user_agent):
     else:
         cands = SCREENS_ANDROID
     return cands[hash(user_agent or '') % len(cands)]
+
 
 def aes_ctr_encrypt(plaintext, key_bytes, iv_bytes):
     key = bytearray(key_bytes) if isinstance(key_bytes, (bytes, bytearray)) else bytearray(key_bytes)
@@ -320,8 +326,9 @@ def aes_ctr_encrypt(plaintext, key_bytes, iv_bytes):
                 break
     return bytes(out)
 
+
 def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
-    if not ticket or not isinstance(ticket, str) or len(ticket) < MIN_TICKET_LEN:
+    if len(ticket) < MIN_TICKET_LEN:
         return None
 
     if now_ms is None:
@@ -362,9 +369,8 @@ def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
 
     return meta, stream
 
+
 def extract_ticket(arg):
-    if not arg or not isinstance(arg, str):
-        return ""
     t = arg.strip()
     if t.startswith('http'):
         parsed = urllib.parse.urlparse(t)
@@ -374,13 +380,44 @@ def extract_ticket(arg):
         return t
     return t
 
+
 def extract_ticket_from_arg(arg):
-    if not arg or not isinstance(arg, str):
-        return ""
     t = arg.strip()
     if t.startswith('http'):
         return extract_ticket(t)
+    if t.endswith('.txt') or '/' in t or '\\' in t:
+        try:
+            with open(t) as f:
+                content = f.read().strip()
+                if content:
+                    return extract_ticket_from_arg(content)
+        except (IOError, OSError):
+            pass
     return t
+
+
+def decode_callback_url(loot_url):
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(loot_url).query)
+    r_param = qs.get('r', [''])[0]
+    if not r_param:
+        return None
+    b64 = r_param.replace('-', '+').replace('_', '/')
+    padding = (4 - len(b64) % 4) % 4
+    try:
+        dec = base64.b64decode(b64 + '=' * padding).decode('utf-8')
+        if dec.startswith('http'):
+            return dec
+    except Exception:
+        pass
+    return None
+
+
+def extract_ticket_from_callback(callback_url):
+    if not callback_url:
+        return None
+    qs = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
+    return qs.get('d', [None])[0]
+
 
 if _HAS_CFFI:
     step_pool = _CffiPool(impersonate="chrome")
@@ -389,134 +426,137 @@ else:
     if _proxy_url:
         step_pool = urllib3.ProxyManager(
             _proxy_url, num_pools=8, maxsize=64, block=False, retries=False,
-            timeout=urllib3.Timeout(connect=2.0, read=6.0),
+            timeout=urllib3.Timeout(connect=3.0, read=8.0),
         )
     else:
         step_pool = urllib3.PoolManager(
             num_pools=8, maxsize=64, block=False, retries=False,
-            timeout=urllib3.Timeout(connect=2.0, read=6.0),
+            timeout=urllib3.Timeout(connect=3.0, read=8.0),
         )
 
-def do_step(ticket, service=3, session=None, now_ms=None):
-    try:
-        step_ua = rand_ua()
-        built = build_meta_stream(ticket, now_ms, user_agent=step_ua)
-        if built is None:
-            return {"success": False, "error": "ticket 长度不足或无效"}
-        meta, stream = built
-        url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(ticket)}&service={service}"
-        body = json.dumps({
-            "captcha": None,
-            "meta": meta,
-            "stream": stream,
-            "resolved": True
-        }).encode()
-        last_err = None
-        for attempt in range(2):
-            try:
-                r = step_pool.request('PUT', url, body=body, redirect=False, timeout=6, headers={
-                    'User-Agent': step_ua,
-                    'Content-Type': 'application/json',
-                    'Accept': 'application/json, text/plain, */*',
-                    'x-client-name': 'platoboost webclient',
-                    'x-client-version': client_version()
-                })
-                if getattr(r, 'status', getattr(r, 'status_code', 0)) != 200:
-                    last_err = f"http {getattr(r, 'status', getattr(r, 'status_code', 0))}"
-                    continue
-                try:
-                    return json.loads(_get_response_body(r))
-                except Exception:
-                    last_err = "non-json response"
-                    continue
-            except Exception as e:
-                last_err = f"{type(e).__name__}: {e}"
-                continue
-        return {"success": False, "error": last_err or "step failed"}
-    except Exception as e:
-        return {"success": False, "error": f"do_step exception: {type(e).__name__} - {str(e)}"}
 
-def get_json(path_qs, retries=1):
+def create_session():
+    s = requests.Session()
+    s.headers.update({
+        'User-Agent': rand_ua(),
+        'Content-Type': 'application/json',
+        'Accept': 'application/json, text/plain, */*',
+    })
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=8, pool_maxsize=32, max_retries=0)
+    s.mount('http://', adapter)
+    s.mount('https://', adapter)
+    return s
+
+
+def do_step(ticket, service=3, session=None, now_ms=None):
+    step_ua = rand_ua()
+    built = build_meta_stream(ticket, now_ms, user_agent=step_ua)
+    if built is None:
+        return {"success": False,
+                "error": f"ticket 长度不足（{len(ticket)} 字符，至少要 {MIN_TICKET_LEN} 个）"}
+    meta, stream = built
+
+    url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(ticket)}&service={service}"
+
+    body = json.dumps({
+        "captcha": None,
+        "meta": meta,
+        "stream": stream,
+        "resolved": True
+    }).encode()
+
+    STEP_HTTP_RETRIES = 3
+    STEP_RETRY_SLEEP = 0.5
+    last_err = None
+    for attempt in range(STEP_HTTP_RETRIES + 1):
+        try:
+            r = step_pool.request('PUT', url, body=body, redirect=False, headers={
+                'User-Agent': step_ua,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/plain, */*',
+                'x-client-name': 'platoboost webclient',
+                'x-client-version': client_version()
+            })
+            if r.status != 200:
+                last_err = f"http {r.status}"
+                if attempt < STEP_HTTP_RETRIES:
+                    time.sleep(STEP_RETRY_SLEEP)
+                    continue
+                return {"success": False, "error": last_err}
+            try:
+                return json.loads(r.data)
+            except Exception:
+                last_err = "non-json response"
+                if attempt < STEP_HTTP_RETRIES:
+                    time.sleep(STEP_RETRY_SLEEP)
+                    continue
+                return {"success": False, "error": last_err}
+        except Exception as e:
+            last_err = str(e)
+            if attempt < STEP_HTTP_RETRIES:
+                time.sleep(STEP_RETRY_SLEEP)
+                continue
+            return {"success": False, "error": last_err}
+    return {"success": False, "error": last_err or "step failed"}
+
+
+def get_json(path_qs, retries=3, sleep=0.25):
     last_err = None
     for attempt in range(retries + 1):
         try:
             r = step_pool.request('GET', f"{AUTH_API}/{path_qs}",
                 redirect=False,
-                timeout=5,
                 headers={'User-Agent': rand_ua(), 'Accept': 'application/json'})
-            if getattr(r, 'status', getattr(r, 'status_code', 0)) != 200:
-                last_err = f"http {getattr(r, 'status', getattr(r, 'status_code', 0))}"
-                continue
-            return json.loads(_get_response_body(r))
+            if r.status != 200:
+                last_err = f"http {r.status}"
+                if attempt < retries:
+                    time.sleep(sleep)
+                    continue
+                return {"success": False, "error": last_err, "transient": True}
+            try:
+                return json.loads(r.data)
+            except Exception:
+                last_err = "non-json response"
+                if attempt < retries:
+                    time.sleep(sleep)
+                    continue
+                return {"success": False, "error": last_err, "transient": True}
         except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
-            continue
+            last_err = str(e)
+            if attempt < retries:
+                time.sleep(sleep)
+                continue
+            return {"success": False, "error": last_err, "transient": True}
     return {"success": False, "error": last_err or "get failed", "transient": True}
+
+
+def get_session_status(ticket, session=None):
+    return get_json(f"session/status?ticket={urllib.parse.quote(ticket)}")
+
 
 def get_session_metadata(ticket, session=None):
     return get_json(f"session/metadata?ticket={urllib.parse.quote(ticket)}")
 
+
+INVALID_MARKERS = ('invalid payload', 'expired', 'not found', 'invalid session',
+                     'invalid ticket', 'does not exist')
+
+
 def check_ticket_valid(ticket, session=None):
     try:
         meta = get_session_metadata(ticket, session=session)
-        if not isinstance(meta, dict):
-            return True, None
-        if meta.get('success') is True:
-            return True, None
-        if meta.get('transient'):
-            return True, None
-        if meta.get('success') is False:
-            msg = str(meta.get('message') or meta.get('error') or '').lower()
-            if 'invalid' in msg or 'expired' in msg or 'not found' in msg:
-                return False, str(meta.get('message') or meta.get('error') or 'invalid link')
-            return True, None
+    except Exception:
         return True, None
-    except Exception as e:
+    if not isinstance(meta, dict):
         return True, None
-
-app = FastAPI()
-
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    return JSONResponse(
-        status_code=200,
-        content={"key": None, "error": f"global exception: {type(exc).__name__}"}
-    )
-
-@app.on_event("startup")
-def startup_event():
-    start_version_watcher()
-
-@app.get("/health")
-@app.get("/healthz")
-@app.get("/")
-def health_check():
-    return {"status": "ok"}
-
-@app.get("/delta")
-def delta(url: str = Query(...)):
-    try:
-        ticket = extract_ticket_from_arg(url)
-        if not ticket or not isinstance(ticket, str) or len(ticket) < MIN_TICKET_LEN:
-            return {"key": None, "error": "invalid url (no ticket)"}
-
-        valid, err = check_ticket_valid(ticket)
-        if not valid:
-            return {"key": None, "error": err or "expired link"}
-
-        result = do_step(ticket)
-        if isinstance(result, dict):
-            if result.get("success") is True and result.get("key"):
-                return {"key": result["key"], "error": None}
-            if result.get("key"):
-                return {"key": result["key"], "error": None}
-            err_msg = str(result.get("error", ""))
-            return {"key": None, "error": err_msg}
-
-        return {"key": None, "error": "solve failed"}
-    except Exception as e:
-        return {"key": None, "error": f"solve exception: {type(e).__name__} - {traceback.format_exc()}"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    if meta.get('success') is True:
+        return True, None
+    if meta.get('transient'):
+        return True, None
+    if meta.get('success') is False:
+        msg = str(meta.get('message') or meta.get('error') or '').lower()
+        if any(m in msg for m in INVALID_MARKERS):
+            return False, str(meta.get('message') or meta.get('error') or 'invalid link')
+        return True, None
+    return True, None
