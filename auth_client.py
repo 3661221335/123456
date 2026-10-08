@@ -9,6 +9,7 @@ import string
 import threading
 import time
 import os
+import traceback
 import urllib.parse
 import requests
 import urllib3
@@ -42,6 +43,8 @@ _client_version_at = time.time()
 _ver_lock = threading.Lock()
 
 def _get_response_body(r):
+    if not r:
+        return b''
     if hasattr(r, 'data') and r.data is not None:
         return r.data
     if hasattr(r, 'content') and r.content is not None:
@@ -318,7 +321,7 @@ def aes_ctr_encrypt(plaintext, key_bytes, iv_bytes):
     return bytes(out)
 
 def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
-    if not ticket or len(ticket) < MIN_TICKET_LEN:
+    if not ticket or not isinstance(ticket, str) or len(ticket) < MIN_TICKET_LEN:
         return None
 
     if now_ms is None:
@@ -360,7 +363,7 @@ def build_meta_stream(ticket, now_ms=None, user_agent=None, screen=None):
     return meta, stream
 
 def extract_ticket(arg):
-    if not arg:
+    if not arg or not isinstance(arg, str):
         return ""
     t = arg.strip()
     if t.startswith('http'):
@@ -372,7 +375,7 @@ def extract_ticket(arg):
     return t
 
 def extract_ticket_from_arg(arg):
-    if not arg:
+    if not arg or not isinstance(arg, str):
         return ""
     t = arg.strip()
     if t.startswith('http'):
@@ -395,44 +398,43 @@ else:
         )
 
 def do_step(ticket, service=3, session=None, now_ms=None):
-    step_ua = rand_ua()
-    built = build_meta_stream(ticket, now_ms, user_agent=step_ua)
-    if built is None:
-        return {"success": False,
-                "error": f"ticket 长度不足（{len(ticket)} 字符，至少要 {MIN_TICKET_LEN} 个）"}
-    meta, stream = built
-
-    url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(ticket)}&service={service}"
-
-    body = json.dumps({
-        "captcha": None,
-        "meta": meta,
-        "stream": stream,
-        "resolved": True
-    }).encode()
-
-    last_err = None
-    for attempt in range(2):
-        try:
-            r = step_pool.request('PUT', url, body=body, redirect=False, timeout=6, headers={
-                'User-Agent': step_ua,
-                'Content-Type': 'application/json',
-                'Accept': 'application/json, text/plain, */*',
-                'x-client-name': 'platoboost webclient',
-                'x-client-version': client_version()
-            })
-            if getattr(r, 'status', getattr(r, 'status_code', 0)) != 200:
-                last_err = f"http {getattr(r, 'status', getattr(r, 'status_code', 0))}"
-                continue
+    try:
+        step_ua = rand_ua()
+        built = build_meta_stream(ticket, now_ms, user_agent=step_ua)
+        if built is None:
+            return {"success": False, "error": "ticket 长度不足或无效"}
+        meta, stream = built
+        url = f"{AUTH_API}/session/step?ticket={urllib.parse.quote(ticket)}&service={service}"
+        body = json.dumps({
+            "captcha": None,
+            "meta": meta,
+            "stream": stream,
+            "resolved": True
+        }).encode()
+        last_err = None
+        for attempt in range(2):
             try:
-                return json.loads(_get_response_body(r))
-            except Exception:
-                last_err = "non-json response"
+                r = step_pool.request('PUT', url, body=body, redirect=False, timeout=6, headers={
+                    'User-Agent': step_ua,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json, text/plain, */*',
+                    'x-client-name': 'platoboost webclient',
+                    'x-client-version': client_version()
+                })
+                if getattr(r, 'status', getattr(r, 'status_code', 0)) != 200:
+                    last_err = f"http {getattr(r, 'status', getattr(r, 'status_code', 0))}"
+                    continue
+                try:
+                    return json.loads(_get_response_body(r))
+                except Exception:
+                    last_err = "non-json response"
+                    continue
+            except Exception as e:
+                last_err = f"{type(e).__name__}: {e}"
                 continue
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
-            continue
-    return {"success": False, "error": last_err or "step failed"}
+        return {"success": False, "error": last_err or "step failed"}
+    except Exception as e:
+        return {"success": False, "error": f"do_step exception: {type(e).__name__} - {str(e)}"}
 
 def get_json(path_qs, retries=1):
     last_err = None
@@ -457,20 +459,20 @@ def get_session_metadata(ticket, session=None):
 def check_ticket_valid(ticket, session=None):
     try:
         meta = get_session_metadata(ticket, session=session)
-    except Exception:
+        if not isinstance(meta, dict):
+            return True, None
+        if meta.get('success') is True:
+            return True, None
+        if meta.get('transient'):
+            return True, None
+        if meta.get('success') is False:
+            msg = str(meta.get('message') or meta.get('error') or '').lower()
+            if 'invalid' in msg or 'expired' in msg or 'not found' in msg:
+                return False, str(meta.get('message') or meta.get('error') or 'invalid link')
+            return True, None
         return True, None
-    if not isinstance(meta, dict):
+    except Exception as e:
         return True, None
-    if meta.get('success') is True:
-        return True, None
-    if meta.get('transient'):
-        return True, None
-    if meta.get('success') is False:
-        msg = str(meta.get('message') or meta.get('error') or '').lower()
-        if 'invalid' in msg or 'expired' in msg or 'not found' in msg:
-            return False, str(meta.get('message') or meta.get('error') or 'invalid link')
-        return True, None
-    return True, None
 
 app = FastAPI()
 
@@ -478,7 +480,7 @@ app = FastAPI()
 async def global_exception_handler(request, exc):
     return JSONResponse(
         status_code=200,
-        content={"key": None, "error": f"solve exception: {type(exc).__name__}"}
+        content={"key": None, "error": f"global exception: {type(exc).__name__}"}
     )
 
 @app.on_event("startup")
@@ -495,7 +497,7 @@ def health_check():
 def delta(url: str = Query(...)):
     try:
         ticket = extract_ticket_from_arg(url)
-        if not ticket or len(ticket) < MIN_TICKET_LEN:
+        if not ticket or not isinstance(ticket, str) or len(ticket) < MIN_TICKET_LEN:
             return {"key": None, "error": "invalid url (no ticket)"}
 
         valid, err = check_ticket_valid(ticket)
@@ -513,7 +515,7 @@ def delta(url: str = Query(...)):
 
         return {"key": None, "error": "solve failed"}
     except Exception as e:
-        return {"key": None, "error": f"solve exception: {type(e).__name__}"}
+        return {"key": None, "error": f"solve exception: {type(e).__name__} - {traceback.format_exc()}"}
 
 if __name__ == "__main__":
     import uvicorn
