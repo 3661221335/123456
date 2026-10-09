@@ -70,13 +70,6 @@ class Timer:
         return f"Timer({self.total():.1f}s total, {len(self.phases)} phases)"
 
 
-#验证码
-# 上游已取消图形验证码环节:step 的 captcha 字段不校验(null/任意值均可),
-# 旧版 captcha 服务已换成 orbit 类型、旧识别器失效,这里不再有识别步骤。
-# The far end dropped the picture captcha (the step captcha field is not
-# checked), so there is no recognition step any more.
-
-
 #Metadata->Service解析
 def resolve_service(ticket, session=None, verbose=True):
     #从metadata获取service及checkpointCount（决定需要多少轮/步），返回 (service, checkpointCount)
@@ -397,7 +390,41 @@ def solve_chain(ticket, verbose=True, max_rounds=MAX_ROUNDS, session=None):
     return None, timer
 
 
-# CLI
+# ================= 这里是给你加的 FastAPI 外壳，让 SnapDeploy 能跑起来 =================
+from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
+
+app = FastAPI()
+
+@app.on_event("startup")
+def startup_event():
+    # 启动后台版本监控线程
+    AUTH.start_version_watcher()
+
+@app.get("/health")
+@app.get("/healthz")
+@app.get("/")
+def health_check():
+    return {"status": "ok"}
+
+@app.get("/delta")
+def delta(url: str = Query(...)):
+    try:
+        ticket = AUTH.extract_ticket_from_arg(url)
+        if not ticket or len(ticket) < 33:
+            return {"key": None, "error": "invalid url (no ticket)"}
+        
+        # 直接调用原始的解卡逻辑
+        key, timer = solve_chain(ticket, verbose=False, max_rounds=MAX_ROUNDS, session=None)
+        
+        if key:
+            return {"key": key, "error": None}
+        else:
+            return {"key": None, "error": "solve failed"}
+    except Exception as e:
+        return {"key": None, "error": f"solve exception: {type(e).__name__} - {str(e)}"}
+
+# 保留你原本的 CLI 入口，这样在本地电脑也能直接运行
 def main():
     ap = argparse.ArgumentParser(
         description='Delta自动求解器',
@@ -422,11 +449,6 @@ def main():
 
     verbose = not args.quiet
 
-    # 后台盯上游客户端版本：启动刷一次，之后每小时一次。
-    # Watch the far end's client version in the background: once at startup,
-    # then hourly.
-    AUTH.start_version_watcher()
-
     tickets = []
     gen_start = time.time()
 
@@ -442,8 +464,6 @@ def main():
             print(f'[-] 生成链接失败: {e}', file=sys.stderr, flush=True)
             sys.exit(1)
     elif args.target:
-        # 命令行参数才允许从文件读 ticket（一行一个那种）。
-        # HTTP 接口走的是 extract_ticket，不读文件。
         tickets.append(AUTH.extract_ticket_from_arg(args.target))
     else:
         ap.print_help()
@@ -454,7 +474,6 @@ def main():
             print(f'https://auth.platorelay.com/a?d={t}')
         return
 
-    #逐条求解
     results = []
     for i, ticket in enumerate(tickets):
         t0 = time.time()
@@ -477,7 +496,6 @@ def main():
                 print(f'[-] 阶段明细:')
                 print(timer.summary())
 
-    #汇总
     total_elapsed = time.time() - gen_start
     success_count = sum(1 for _, key, _, _ in results if key)
     total_timer = Timer()
@@ -495,9 +513,6 @@ def main():
         print(total_timer.summary())
     print(f'{"=" * 60}', flush=True)
 
-
 if __name__ == '__main__':
+    # 保留你在本地命令行直接运行的选项
     main()
-
-# 给 SnapDeploy / FastAPI 用的入口（必须放在文件最末尾，防止循环导入）
-from server import app
